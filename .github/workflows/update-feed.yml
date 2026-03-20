@@ -13,13 +13,14 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    steps:
+   steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - run: pip install -r requirements.txt
-      - run: mkdir -p ./public && python3 kupa_reviews_feed.py --output ./public/kupa_reviews_feed.xml
+      - run: mkdir -p ./public
+      - run: python3 kupa_reviews_feed.py --output ./public/kupa_reviews_feed.xml
       - uses: actions/upload-pages-artifact@v3
         with:
           path: ./public
