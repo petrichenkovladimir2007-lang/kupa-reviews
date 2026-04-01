@@ -407,17 +407,35 @@ def format_timestamp(review):
         return datetime.now().strftime("%Y-%m-%dT10:00:00+02:00")
 
 
-def build_content(review):
-    parts = []
+def build_content(review, product_name=""):
+    """
+    Формує унікальний текст відгуку.
+
+    Якщо автор написав текст — використовуємо його.
+    Якщо тексту немає (тільки теги від Prom.ua) — формуємо унікальний контент:
+    "Автор про Назва товару: Тег1, Тег2, Тег3"
+
+    Це робить кожен відгук унікальним (різний автор + різний товар),
+    і Google не відхиляє як boilerplate/duplicate content.
+    """
     if review["text"]:
-        # Прибираємо крапку/пробіл в кінці тексту перед додаванням тегів
-        text = review["text"].rstrip(". ")
-        parts.append(text)
+        return review["text"].rstrip(". ")
+
+    # Немає тексту — формуємо унікальний контент з тегів + автора + товару
+    parts = []
+
+    author = review.get("author", "")
+    if author and product_name:
+        parts.append(f"{author} про {product_name}")
+
     if review["tags"]:
-        parts.append(". ".join(review["tags"]))
-    if not parts:
-        parts.append(review.get("rating_text") or "Відмінно")
-    return ". ".join(parts)
+        parts.append(", ".join(review["tags"]))
+    elif review.get("rating_text"):
+        parts.append(review["rating_text"])
+    else:
+        parts.append("Відмінно")
+
+    return ": ".join(parts) if len(parts) > 1 else parts[0]
 
 
 def escape_xml(text):
@@ -458,13 +476,14 @@ def generate_xml_feed(matched_pairs):
             continue
         seen_ids.add(review_id)
 
+        product_name = product.get("title", "")
+        content = build_content(review, product_name)
+
         timestamp = format_timestamp(review)
-        content = build_content(review)
         rating = review["rating"]
 
         mpn = product.get("mpn") or product.get("prom_id") or product.get("id", "")
         brand = product.get("brand", "")
-        product_name = product.get("title", "")
         product_url = product.get("link", "")
 
         if product_url and "source=merchant_center" not in product_url:
