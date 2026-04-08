@@ -3,9 +3,13 @@
 Парсер відгуків з Prom.ua → XML-фід відгуків для Google Merchant Center (v2.3)
 
 Використання:
-    python3 kupa_reviews_feed.py                # Повний запуск
-    python3 kupa_reviews_feed.py --debug        # Дебаг-режим (1 сторінка)
-    python3 kupa_reviews_feed.py --pages 5      # Парсити перші 5 сторінок
+    python3 kupa_reviews_feed.py                      # Повний запуск (лише з текстом)
+    python3 kupa_reviews_feed.py --debug              # Дебаг-режим (1 сторінка)
+    python3 kupa_reviews_feed.py --pages 5            # Парсити перші 5 сторінок
+    python3 kupa_reviews_feed.py --include-tags-only  # Включити і відгуки без тексту (теги)
+
+За замовчуванням у фід потрапляють ТІЛЬКИ відгуки з реальним текстом автора.
+Це вимога Google Merchant Center — модерація не приймає boilerplate теги.
 
 CRON (щодня о 3:00):
     0 3 * * * cd /path/to/script && python3 kupa_reviews_feed.py >> cron.log 2>&1
@@ -67,6 +71,9 @@ CONFIG = {
         "Погано": 2,
         "Жахливо": 1,
     },
+
+    # Мінімальна довжина тексту відгуку (коротші ігноруються як некорисні)
+    "min_text_length": 5,
 }
 
 # ============================================================
@@ -211,14 +218,6 @@ def parse_reviews_page(html, page_num, debug=False):
 def parse_review_item(item, debug=False):
     """
     Парсить один <li class='cs-comments__item'>.
-
-    HTML-структура Prom.ua:
-    - Автор: <strong data-qaid="author_name">
-    - Дата:  <time data-qaid="review_date" datetime="...">
-    - Рейтинг: <span class="cs-rating__state" title="Рейтинг N з 5">
-    - Текст: <p data-qaid="review_text">
-    - Товари: <div data-reviews-products='[{"id":..., "name":..., "url":...}]'>
-    - Теги:  <li class="b-comments-tags__item" data-tag-title="...">
     """
 
     review = {
@@ -232,18 +231,15 @@ def parse_review_item(item, debug=False):
         "tags": [],
     }
 
-    # ---- Автор ----
     author_el = item.select_one('[data-qaid="author_name"]')
     if author_el:
         review["author"] = author_el.get_text(strip=True)
 
-    # ---- Дата ----
     date_el = item.select_one('[data-qaid="review_date"]')
     if date_el:
         review["datetime_iso"] = date_el.get("datetime", "")
         review["date"] = date_el.get_text(strip=True)
 
-    # ---- Рейтинг ----
     rating_el = item.select_one("span.cs-rating__state")
     if rating_el:
         review["rating_text"] = rating_el.get_text(strip=True)
@@ -254,12 +250,10 @@ def parse_review_item(item, debug=False):
         elif review["rating_text"] in CONFIG["rating_map"]:
             review["rating"] = CONFIG["rating_map"][review["rating_text"]]
 
-    # ---- Текст відгуку ----
     text_el = item.select_one('[data-qaid="review_text"]')
     if text_el:
         review["text"] = text_el.get_text(strip=True)
 
-    # ---- Товари (JSON з data-reviews-products) ----
     products_el = item.select_one('[data-reviews-products]')
     if products_el:
         try:
@@ -275,7 +269,6 @@ def parse_review_item(item, debug=False):
             if debug:
                 log.warning(f"Помилка парсингу JSON товарів: {e}")
 
-    # ---- Теги ----
     tag_els = item.select("li.b-comments-tags__item")
     for tag in tag_els:
         tag_title = tag.get("data-tag-title", "")
@@ -326,7 +319,6 @@ def collect_all_reviews(session, max_pages_override=None, debug=False):
 
         reviews, detected_max = parse_reviews_page(html, page_num, debug=(debug and page_num == 1))
 
-        # Автодетект max_pages з першої сторінки
         if detected_max and not max_pages_override and not CONFIG["max_pages"]:
             max_pages = detected_max
             log.info(f"Автодетект: {max_pages} сторінок")
@@ -344,6 +336,38 @@ def collect_all_reviews(session, max_pages_override=None, debug=False):
         time.sleep(CONFIG["request_delay"])
 
     return all_reviews
+
+
+# ============================================================
+# ФІЛЬТРАЦІЯ ВІДГУКІВ ЗА НАЯВНІСТЮ ТЕКСТУ
+# ============================================================
+
+def filter_reviews_with_text(reviews):
+    """
+    Залишає лише відгуки з реальним текстом від автора.
+    Відгуки що містять тільки теги від Prom.ua — відкидаються,
+    бо Google Merchant Center відхиляє їх як boilerplate content.
+    """
+    min_len = CONFIG["min_text_length"]
+    filtered = []
+    no_text = 0
+    too_short = 0
+
+    for review in reviews:
+        text = review.get("text", "").strip()
+        if not text:
+            no_text += 1
+            continue
+        if len(text) < min_len:
+            too_short += 1
+            continue
+        filtered.append(review)
+
+    log.info(f"Фільтр тексту:")
+    log.info(f"  {len(filtered)} відгуків з реальним текстом")
+    log.info(f"  {no_text} відгуків без тексту (лише теги) — відкинуто")
+    log.info(f"  {too_short} відгуків з надто коротким текстом (<{min_len} симв.) — відкинуто")
+    return filtered
 
 
 # ============================================================
@@ -409,33 +433,14 @@ def format_timestamp(review):
 
 def build_content(review, product_name=""):
     """
-    Формує унікальний текст відгуку.
+    Формує текст відгуку для <content>.
 
-    Якщо автор написав текст — використовуємо його.
-    Якщо тексту немає (тільки теги від Prom.ua) — формуємо унікальний контент:
-    "Автор про Назва товару: Тег1, Тег2, Тег3"
-
-    Це робить кожен відгук унікальним (різний автор + різний товар),
-    і Google не відхиляє як boilerplate/duplicate content.
+    За замовчуванням — тільки реальний текст від автора.
+    Теги від Prom.ua НЕ додаємо, бо Google відхиляє їх як boilerplate.
     """
-    if review["text"]:
+    if review.get("text"):
         return review["text"].rstrip(". ")
-
-    # Немає тексту — формуємо унікальний контент з тегів + автора + товару
-    parts = []
-
-    author = review.get("author", "")
-    if author and product_name:
-        parts.append(f"{author} про {product_name}")
-
-    if review["tags"]:
-        parts.append(", ".join(review["tags"]))
-    elif review.get("rating_text"):
-        parts.append(review["rating_text"])
-    else:
-        parts.append("Відмінно")
-
-    return ": ".join(parts) if len(parts) > 1 else parts[0]
+    return None
 
 
 def escape_xml(text):
@@ -469,15 +474,22 @@ def generate_xml_feed(matched_pairs):
     ]
 
     seen_ids = set()
+    skipped_no_content = 0
 
     for review, product in matched_pairs:
         review_id = generate_review_id(review, product)
         if review_id in seen_ids:
             continue
-        seen_ids.add(review_id)
 
         product_name = product.get("title", "")
         content = build_content(review, product_name)
+
+        # Захист — якщо content пустий, пропускаємо
+        if not content:
+            skipped_no_content += 1
+            continue
+
+        seen_ids.add(review_id)
 
         timestamp = format_timestamp(review)
         rating = review["rating"]
@@ -517,6 +529,8 @@ def generate_xml_feed(matched_pairs):
     lines.append("    </reviews>")
     lines.append("</feed>")
 
+    if skipped_no_content:
+        log.info(f"Пропущено {skipped_no_content} пар без тексту")
     log.info(f"XML: {len(seen_ids)} унікальних відгуків у фіді")
     return "\n".join(lines)
 
@@ -530,6 +544,9 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Дебаг-режим (1 сторінка)")
     parser.add_argument("--pages", type=int, default=None, help="Кількість сторінок")
     parser.add_argument("--output", type=str, default=None, help="Вихідний файл")
+    parser.add_argument("--include-tags-only", action="store_true",
+                        help="Включити також відгуки без тексту (тільки теги). "
+                             "За замовчуванням такі відгуки відкидаються через вимоги GMC.")
     args = parser.parse_args()
 
     if args.debug:
@@ -537,10 +554,12 @@ def main():
 
     output_file = args.output or CONFIG["output_file"]
     max_pages = 1 if args.debug else args.pages
+    text_only = not args.include_tags_only
 
     log.info("=" * 60)
     log.info(f"Prom.ua Reviews Parser → GMC XML Feed")
     log.info(f"Магазин: {CONFIG['publisher_name']}")
+    log.info(f"Режим: {'ТІЛЬКИ відгуки з текстом' if text_only else 'ВСІ відгуки (вкл. теги)'}")
     log.info("=" * 60)
 
     session = create_session()
@@ -559,12 +578,18 @@ def main():
         log.error("Жодного відгуку не знайдено!")
         sys.exit(1)
 
-    # 3. Матчинг
+    # 3. Фільтрація за наявністю тексту (за замовчуванням)
+    if text_only:
+        reviews = filter_reviews_with_text(reviews)
+        if not reviews:
+            log.error("Після фільтрації не залишилось жодного відгуку з текстом!")
+            sys.exit(1)
+
+    # 4. Матчинг
     matched_pairs = match_and_expand_reviews(reviews, products_feed)
 
     if not matched_pairs:
         log.error("Жодного відгуку не зматчилось з товарами у фіді!")
-        log.error("Перевір: prom_id товарів у відгуках vs prom_id у фіді")
         if reviews and reviews[0]["products"]:
             sample_ids = [p["id"] for p in reviews[0]["products"][:3]]
             feed_ids = list(products_feed.keys())[:5]
@@ -572,10 +597,10 @@ def main():
             log.error(f"  Приклад ID з фіда: {feed_ids}")
         sys.exit(1)
 
-    # 4. XML
+    # 5. XML
     xml_content = generate_xml_feed(matched_pairs)
 
-    # 5. Зберігаємо
+    # 6. Зберігаємо
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(xml_content)
 
