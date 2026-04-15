@@ -474,7 +474,9 @@ def generate_xml_feed(matched_pairs):
     ]
 
     seen_ids = set()
+    seen_content = set()
     skipped_no_content = 0
+    skipped_duplicate = 0
 
     for review, product in matched_pairs:
         review_id = generate_review_id(review, product)
@@ -488,6 +490,13 @@ def generate_xml_feed(matched_pairs):
         if not content:
             skipped_no_content += 1
             continue
+
+        # Дедуплікація контенту — один і той самий текст лише один раз у фіді
+        content_lower = content.strip().lower()
+        if content_lower in seen_content:
+            skipped_duplicate += 1
+            continue
+        seen_content.add(content_lower)
 
         seen_ids.add(review_id)
 
@@ -531,6 +540,8 @@ def generate_xml_feed(matched_pairs):
 
     if skipped_no_content:
         log.info(f"Пропущено {skipped_no_content} пар без тексту")
+    if skipped_duplicate:
+        log.info(f"Пропущено {skipped_duplicate} пар — дублікат тексту")
     log.info(f"XML: {len(seen_ids)} унікальних відгуків у фіді")
     return "\n".join(lines)
 
