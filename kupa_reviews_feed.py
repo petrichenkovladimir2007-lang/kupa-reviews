@@ -433,14 +433,30 @@ def format_timestamp(review):
 
 def build_content(review, product_name=""):
     """
-    Формує текст відгуку для <content>.
+    Формує унікальний текст відгуку для <content>.
 
-    За замовчуванням — тільки реальний текст від автора.
-    Теги від Prom.ua НЕ додаємо, бо Google відхиляє їх як boilerplate.
+    Якщо автор написав текст — використовуємо його.
+    Якщо тексту немає — формуємо унікальний контент:
+    "Автор про Назва товару: Тег1, Тег2, Тег3"
     """
     if review.get("text"):
         return review["text"].rstrip(". ")
-    return None
+
+    # Немає тексту — формуємо унікальний контент з тегів + автора + товару
+    parts = []
+
+    author = review.get("author", "")
+    if author and product_name:
+        parts.append(f"{author} про {product_name}")
+
+    if review["tags"]:
+        parts.append(", ".join(review["tags"]))
+    elif review.get("rating_text"):
+        parts.append(review["rating_text"])
+    else:
+        parts.append("Відмінно")
+
+    return ": ".join(parts) if len(parts) > 1 else parts[0]
 
 
 def escape_xml(text):
@@ -474,9 +490,7 @@ def generate_xml_feed(matched_pairs):
     ]
 
     seen_ids = set()
-    seen_content = set()
     skipped_no_content = 0
-    skipped_duplicate = 0
 
     for review, product in matched_pairs:
         review_id = generate_review_id(review, product)
@@ -490,13 +504,6 @@ def generate_xml_feed(matched_pairs):
         if not content:
             skipped_no_content += 1
             continue
-
-        # Дедуплікація контенту — один і той самий текст лише один раз у фіді
-        content_lower = content.strip().lower()
-        if content_lower in seen_content:
-            skipped_duplicate += 1
-            continue
-        seen_content.add(content_lower)
 
         seen_ids.add(review_id)
 
@@ -540,8 +547,6 @@ def generate_xml_feed(matched_pairs):
 
     if skipped_no_content:
         log.info(f"Пропущено {skipped_no_content} пар без тексту")
-    if skipped_duplicate:
-        log.info(f"Пропущено {skipped_duplicate} пар — дублікат тексту")
     log.info(f"XML: {len(seen_ids)} унікальних відгуків у фіді")
     return "\n".join(lines)
 
@@ -555,9 +560,8 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Дебаг-режим (1 сторінка)")
     parser.add_argument("--pages", type=int, default=None, help="Кількість сторінок")
     parser.add_argument("--output", type=str, default=None, help="Вихідний файл")
-    parser.add_argument("--include-tags-only", action="store_true",
-                        help="Включити також відгуки без тексту (тільки теги). "
-                             "За замовчуванням такі відгуки відкидаються через вимоги GMC.")
+    parser.add_argument("--text-only", action="store_true",
+                        help="Включити лише відгуки з реальним текстом (для проходження модерації GMC).")
     args = parser.parse_args()
 
     if args.debug:
@@ -565,12 +569,12 @@ def main():
 
     output_file = args.output or CONFIG["output_file"]
     max_pages = 1 if args.debug else args.pages
-    text_only = not args.include_tags_only
+    text_only = args.text_only
 
     log.info("=" * 60)
     log.info(f"Prom.ua Reviews Parser → GMC XML Feed")
     log.info(f"Магазин: {CONFIG['publisher_name']}")
-    log.info(f"Режим: {'ТІЛЬКИ відгуки з текстом' if text_only else 'ВСІ відгуки (вкл. теги)'}")
+    log.info(f"Режим: {'ТІЛЬКИ відгуки з текстом' if text_only else 'ВСІ відгуки'}")
     log.info("=" * 60)
 
     session = create_session()
